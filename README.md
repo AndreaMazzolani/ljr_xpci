@@ -1,3 +1,8 @@
+This repository currently contains an early working draft of the LJR XPCI Python implementation. The code was saved to preserve the development state and is being reorganised into a cleaner version. Interfaces, file structure, and example scripts may change.
+
+
+
+
 # LJR XPCI
 
 Python implementation of the Linear Joint Reconstruction (LJR) pipeline for single-shot edge-illumination X-ray phase-contrast computed tomography.
