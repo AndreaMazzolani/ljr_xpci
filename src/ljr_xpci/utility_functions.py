@@ -1,4 +1,6 @@
 import numpy as np
+from scipy.ndimage import uniform_filter
+
 
 
 def err_n(reference_values, comparison_values, axis=None):
@@ -30,63 +32,59 @@ def err_n(reference_values, comparison_values, axis=None):
 
     return np.divide(numerator, denominator, out=np.zeros_like(numerator, dtype=float), where=denominator != 0)
 
+def moving_mean_1d(data, window_size, axis):
+    data = np.asarray(data, dtype=float); window_size = int(window_size)
+    if window_size < 1: raise ValueError("window_size must be positive.")
 
-def choose_threshold_chunk_size(image_shape, memory_budget_gb=1.0, max_chunk_size=200, dtype=np.float32):
-    number_pixels = int(np.prod(image_shape)); bytes_per_threshold = number_pixels * (1 + 5 * np.dtype(dtype).itemsize)
-    return max(1, min(int(max_chunk_size), int(memory_budget_gb * 1024**3 // bytes_per_threshold)))
+    moved_data = np.moveaxis(data, axis, 0); n_samples = moved_data.shape[0]
+    left_radius = (window_size - 1) // 2; right_radius = window_size // 2
+    start_indices = np.maximum(np.arange(n_samples) - left_radius, 0); end_indices = np.minimum(np.arange(n_samples) + right_radius + 1, n_samples)
 
+    cumulative_data = np.concatenate([np.zeros_like(moved_data[:1]), np.cumsum(moved_data, axis=0)], axis=0)
+    moving_sum = np.take(cumulative_data, end_indices, axis=0) - np.take(cumulative_data, start_indices, axis=0)
+    moving_count = (end_indices - start_indices).reshape((n_samples,) + (1,) * (moved_data.ndim - 1))
 
-def _moving_sum_along_axis(data, window_size, axis):
-    n = data.shape[axis]; left = window_size // 2; right = window_size - left - 1
-    start_indices = np.maximum(np.arange(n) - left, 0); end_indices = np.minimum(np.arange(n) + right + 1, n)
-    zero_shape = list(data.shape); zero_shape[axis] = 1
-    cumulative_data = np.concatenate([np.zeros(zero_shape, dtype=data.dtype), np.cumsum(data, axis=axis)], axis=axis)
-    return np.take(cumulative_data, end_indices, axis=axis) - np.take(cumulative_data, start_indices, axis=axis)
+    return np.moveaxis(moving_sum / moving_count, 0, axis)
 
+'''
+def moving_mean_2d(data, window_size):
+    return moving_mean_1d(moving_mean_1d(data, window_size, axis=0), window_size, axis=1)
 
-def moving_mean_2d_stack(data_stack, window_size):
-    data_stack = np.asarray(data_stack)
-    row_counts = _moving_sum_along_axis(np.ones(data_stack.shape[-2:], dtype=data_stack.dtype), window_size, axis=0)
-    local_counts = _moving_sum_along_axis(row_counts, window_size, axis=1)
-    local_sums = _moving_sum_along_axis(_moving_sum_along_axis(data_stack, window_size, axis=-2), window_size, axis=-1)
-    return local_sums / local_counts[None, :, :]
+def moving_mean_3d(data, moving_window_size):
+    data = np.asarray(data, dtype=float)
+    if data.ndim != 3: raise ValueError("data must have shape (Nz, Ny, Nx).")
 
+    if np.isscalar(moving_window_size):
+        window_x = int(moving_window_size); window_y = int(moving_window_size); window_z = data.shape[0]
+    else:
+        window_x, window_y, window_z = [int(v) for v in moving_window_size]
 
-def select_threshold_conditions_batched(s1_tmp, candidate_thresholds, moving_window_size, max_mean_window_count, n_detectors, memory_budget_gb=1.0, max_chunk_size=200):
-    selected_conditions_batched = []; selected_thresholds_batched = []
-    previous_condition = np.zeros_like(s1_tmp, dtype=bool)
-    threshold_index = 0
-    threshold_chunk_size = choose_threshold_chunk_size(s1_tmp.shape, memory_budget_gb=memory_budget_gb, max_chunk_size=max_chunk_size, dtype=np.float32)
+    if min(window_x, window_y, window_z) < 1: raise ValueError("All moving-window sizes must be positive.")
 
-    while threshold_index < candidate_thresholds.size:
-        continue_search = True
-        while continue_search and threshold_index < candidate_thresholds.size:
-            chunk_start = threshold_index; chunk_stop = min(threshold_index + threshold_chunk_size, candidate_thresholds.size)
-            threshold_chunk = candidate_thresholds[chunk_start:chunk_stop]
+    return moving_mean_1d(moving_mean_1d(moving_mean_1d(data, window_z, axis=0), window_y, axis=1), window_x, axis=2)
+'''
 
-            current_conditions_chunk = s1_tmp[None, :, :] < threshold_chunk[:, None, None]
-            condition_differences_chunk = current_conditions_chunk.astype(np.float32) - previous_condition[None, :, :].astype(np.float32)
-
-            local_change_counts = np.max(moving_mean_2d_stack(condition_differences_chunk, moving_window_size), axis=(1, 2)) * moving_window_size**2
-            current_pixel_counts = np.sum(current_conditions_chunk, axis=(1, 2))
-
-            event_positions = np.flatnonzero((local_change_counts > max_mean_window_count) | (current_pixel_counts >= n_detectors**2 - moving_window_size**2))
-
-            if event_positions.size == 0:
-                threshold_index = chunk_stop
-            else:
-                chunk_event_index = int(event_positions[0])
-                current_threshold = threshold_chunk[chunk_event_index]
-                current_condition = current_conditions_chunk[chunk_event_index]
-                threshold_index = chunk_start + chunk_event_index + 1
-
-                if local_change_counts[chunk_event_index] > max_mean_window_count:
-                    selected_conditions_batched.append(current_condition.copy()); selected_thresholds_batched.append(current_threshold); previous_condition = current_condition.copy()
-
-                continue_search = False
-
-    return selected_conditions_batched, np.asarray(selected_thresholds_batched)
+def moving_mean_2d(data, moving_window_size):
+    data = np.asarray(data, dtype=float); moving_window_size = int(moving_window_size)
+    local_sum = uniform_filter(data, size=(moving_window_size, moving_window_size), mode="constant", cval=0.0) * moving_window_size**2
+    local_count = uniform_filter(np.ones_like(data), size=(moving_window_size, moving_window_size), mode="constant", cval=0.0) * moving_window_size**2
+    return local_sum / local_count
 
 
+def moving_mean_3d(data, moving_kernel_size_3d):
+    data = np.asarray(data, dtype=float)
+    window_x, window_y, window_z = moving_kernel_size_3d
+    window_x = int(window_x); window_y = int(window_y); window_z = 1 if window_z is None else int(window_z)
+    kernel_size = (window_z, window_y, window_x)
 
+    local_sum = uniform_filter(data, size=kernel_size, mode="constant", cval=0.0) * (window_x * window_y * window_z)
+    local_count = uniform_filter(np.ones_like(data), size=kernel_size, mode="constant", cval=0.0) * (window_x * window_y * window_z)
+
+    return local_sum / local_count
+
+def normalise_filter_fraction(filter_fraction_by_axis, ndim):
+    if np.isscalar(filter_fraction_by_axis): return tuple(float(filter_fraction_by_axis) for _ in range(ndim))
+    filter_fraction_by_axis = tuple(filter_fraction_by_axis)
+    if len(filter_fraction_by_axis) != ndim: raise ValueError("filter_fraction_by_axis must be scalar or have one entry for each data dimension.")
+    return filter_fraction_by_axis
 
